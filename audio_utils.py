@@ -94,3 +94,22 @@ def get_audio_duration(file_path: Path | str) -> float:
             return float(res.stdout.strip())
         except Exception:
             return 0.0
+
+def validate_audio_voice(file_path: Path | str):
+    """
+    Validate that voice recording has audio content and acceptable duration.
+    Returns: (is_valid: bool, status: str, duration: float, max_amp: float)
+    """
+    try:
+        import numpy as np
+        data, sr = sf.read(str(file_path))
+        duration = len(data) / sr
+        max_amp = float(np.max(np.abs(data)))
+
+        if max_amp < 0.01:
+            return False, "SILENT", duration, max_amp
+        if duration < 2.5:
+            return False, "TOO_SHORT", duration, max_amp
+        return True, "OK", duration, max_amp
+    except Exception as e:
+        return False, str(e), 0.0, 0.0

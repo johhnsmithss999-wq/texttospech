@@ -50,10 +50,16 @@ class TTSEngine:
             print("[TTSEngine] CUDA requested but not available. Falling back to CPU.")
             chosen_device = "cpu"
 
-        print(f"[TTSEngine] Loading {VOXCPM_MODEL_ID} on {chosen_device} (load_denoiser={LOAD_DENOISER})...")
+        # Check for pre-downloaded local snapshot to avoid network lag
+        model_target = VOXCPM_MODEL_ID
+        local_snapshot = Path.home() / ".cache" / "huggingface" / "hub" / "models--openbmb--VoxCPM2" / "snapshots" / "32279effe8c19989596f05d353d1447f51d9e915"
+        if local_snapshot.is_dir():
+            model_target = str(local_snapshot)
+
+        print(f"[TTSEngine] Loading VoxCPM2 from {model_target} on {chosen_device} (load_denoiser={LOAD_DENOISER})...")
         try:
             self.model = VoxCPM.from_pretrained(
-                hf_model_id=VOXCPM_MODEL_ID,
+                hf_model_id=model_target,
                 load_denoiser=LOAD_DENOISER,
                 optimize=False,
                 device=chosen_device
@@ -85,13 +91,11 @@ class TTSEngine:
         if not self.is_loaded or self.model is None:
             self.load_model()
 
-        computed_max_len = min(max(50, len(text) * 4 + 30), 200)
-
         kwargs = {
             "text": text,
             "cfg_value": cfg_value,
             "inference_timesteps": inference_timesteps,
-            "max_len": computed_max_len,
+            "min_len": 8,
             "denoise": denoise
         }
 

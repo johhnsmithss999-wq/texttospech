@@ -34,7 +34,8 @@ from user_manager import UserManager
 from audio_utils import (
     convert_to_wav,
     get_audio_duration,
-    download_file_from_telegram
+    download_file_from_telegram,
+    validate_audio_voice
 )
 from tts_engine import TTSEngine
 
@@ -294,10 +295,27 @@ async def handle_voice_upload(message: Message):
             await status_msg.edit_text("❌ មានបញ្ហាក្នុងការបម្លែង file សំឡេង។ សូមសាកល្បងផ្ញើ Voice Message ថ្មីម្តងទៀត។")
             return
 
+        is_valid, v_status, duration, max_amp = validate_audio_voice(user_voice_path)
+        if not is_valid:
+            if v_status == "SILENT":
+                UserManager.delete_voice(user_id)
+                await status_msg.edit_text(
+                    "⚠️ **សំឡេងដែលបានផ្ញើមកគឺស្ងាត់ (Silent / គ្មានឮសំឡេងនិយាយ)!**\n\n"
+                    "👉 សូមពិនិត្យមើល Microphone របស់ទូរស័ព្ទ ឬកុំព្យូទ័ររបស់អ្នក ហើយថតសំឡេងនិយាយឱ្យឮច្បាស់ម្តងទៀត។",
+                    parse_mode="Markdown"
+                )
+                return
+            elif v_status == "TOO_SHORT":
+                await status_msg.edit_text(
+                    f"⚠️ **សំឡេងដែលបានផ្ញើមកខ្លីពេក (ត្រឹម {duration:.1f} វិនាទី)!**\n\n"
+                    "👉 សូមថតសំឡេងនិយាយឱ្យបានយ៉ាងហោចណាស់ **5 ទៅ 15 វិនាទី** ដើម្បីឱ្យ AI ចាប់យកទឹកដមសំឡេងរបស់អ្នកបានច្បាស់ល្អ។",
+                    parse_mode="Markdown"
+                )
+                return
+
         caption_text = message.caption.strip() if message.caption else None
         UserManager.save_settings(user_id, {"prompt_text": caption_text})
 
-        duration = get_audio_duration(user_voice_path)
         confirm_text = (
             "✅ **បានកំណត់សំឡេងសម្រាប់ Clone រួចរាល់ហើយ!** 🎙️\n\n"
             f"⏱️ រយៈពេលសំឡេង: {duration:.1f} វិនាទី\n"
@@ -326,7 +344,7 @@ async def handle_voice_upload(message: Message):
 @dp.message(F.text & ~F.text.startswith("/"))
 async def handle_tts(message: Message):
     """
-    Handle text message and synthesize speech using the user's cloned voice.
+    Handle text message and synthesize speech using the user's cloned voice or default voice.
     """
     user_id = message.from_user.id
     text = message.text.strip()
@@ -334,30 +352,30 @@ async def handle_tts(message: Message):
     if not text:
         return
 
-    has_voice = UserManager.has_voice(user_id)
-    if not has_voice:
-        await message.answer(
-            "⚠️ **អ្នកមិនទាន់បានដាក់សំឡេងសម្រាប់ Clone នៅឡើយទេ។**\n\n"
-            "👉 សូមផ្ញើ **Voice Message** ឬ **Audio File** របស់អ្នកមកទីនេះសិន ដើម្បីឱ្យ Bot ចងចាំសំឡេងរបស់អ្នក!\n"
-            "បន្ទាប់មកទើបវាយអត្ថបទដើម្បីបម្លែងជាសំឡេងបាន។",
-            parse_mode="Markdown"
-        )
-        return
-
     await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.RECORD_VOICE)
-    processing_msg = await message.answer("⏳ **កំពុងដំណើរការបង្កើតសំឡេង Clone របស់អ្នក...**\n_(សូមរង់ចាំបន្តិច)_", parse_mode="Markdown")
+    processing_msg = await message.answer("⏳ **កំពុងដំណើរការបង្កើតសំឡេង...**\n_(សូមរង់ចាំបន្តិច)_", parse_mode="Markdown")
 
     try:
-        user_voice = str(UserManager.get_voice_path(user_id))
+        user_voice = str(UserManager.get_voice_path(user_id)) if UserManager.has_voice(user_id) else None
+        
+        # Check if the voice file is valid and not silent
+        using_clone = False
+        if user_voice and os.path.exists(user_voice):
+            is_valid, v_status, _, _ = validate_audio_voice(user_voice)
+            if is_valid:
+                using_clone = True
+            else:
+                user_voice = None
+
         settings = UserManager.get_settings(user_id)
-        prompt_text = settings.get("prompt_text")
+        prompt_text = settings.get("prompt_text") if using_clone else None
         cfg_value = settings.get("cfg_value", 2.0)
         timesteps = settings.get("inference_timesteps", 6)
         denoise = settings.get("denoise", False)
 
         tts = TTSEngine.get_instance()
 
-        if prompt_text:
+        if using_clone and prompt_text:
             out_wav, out_ogg = await tts.generate_speech(
                 text=text,
                 prompt_wav_path=user_voice,
@@ -367,7 +385,7 @@ async def handle_tts(message: Message):
                 inference_timesteps=timesteps,
                 denoise=denoise
             )
-        else:
+        elif using_clone:
             out_wav, out_ogg = await tts.generate_speech(
                 text=text,
                 reference_wav_path=user_voice,
@@ -375,9 +393,24 @@ async def handle_tts(message: Message):
                 inference_timesteps=timesteps,
                 denoise=denoise
             )
+        else:
+            # Generate using high-quality default voice
+            out_wav, out_ogg = await tts.generate_speech(
+                text=text,
+                reference_wav_path=None,
+                cfg_value=cfg_value,
+                inference_timesteps=timesteps,
+                denoise=denoise
+            )
 
         duration = get_audio_duration(out_wav)
-        caption = f"🎙️ **សំឡេង Clone:** {duration:.1f}s | Steps: {timesteps}"
+        if using_clone:
+            caption = f"🎙️ **សំឡេង Clone របស់អ្នក:** {duration:.1f}s | Steps: {timesteps}"
+        else:
+            caption = (
+                f"🎙️ **សំឡេងស្តង់ដារ (Default):** {duration:.1f}s | Steps: {timesteps}\n"
+                "💡 *ដើម្បីឱ្យ Bot និយាយជាសំឡេងផ្ទាល់ខ្លួនរបស់អ្នក សូមផ្ញើ Voice Message (5-15 វិនាទី) មកកាន់ Bot!*"
+            )
 
         voice_file = FSInputFile(str(out_ogg))
         await message.answer_voice(
